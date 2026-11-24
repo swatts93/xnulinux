@@ -1228,7 +1228,10 @@ static int run_m2b(void)
 	return enter_arm_init(ba);
 }
 
-static int __init xnu_init(void)
+static void xnu_release(void);
+
+/* Everything before the run (and the run itself); on failure xnu_init gives back what it got (xnu_exit does not run) */
+static int __init xnu_start(void)
 {
 	const void *data; unsigned long size;
 	int err;
@@ -1287,7 +1290,17 @@ static int __init xnu_init(void)
 	return mode == 1 ? run_m1() : mode == 3 ? run_m2b() : run_m2a();
 }
 
-static void __exit xnu_exit(void)
+static int __init xnu_init(void)
+{
+	int err = xnu_start();
+
+	if (err)
+		xnu_release();	/* a failure is always before any XNU CPU runs: its window, memory and files can go */
+	return err;
+}
+
+/* Unmap XNU's window from Linux's kernel table, free its memory, close its files: at unload, or after a failed load */
+static void xnu_release(void)
 {
 	if (window_l1) {
 		int last = -1;
@@ -1306,6 +1319,11 @@ static void __exit xnu_exit(void)
 	if (dk_file) fki_file_close(dk_file);
 	if (ci_file) fki_file_close(ci_file);
 	if (in_file) fki_file_close(in_file);
+}
+
+static void __exit xnu_exit(void)
+{
+	xnu_release();
 }
 
 module_init(xnu_init);

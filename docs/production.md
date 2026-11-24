@@ -104,6 +104,9 @@ records, hosted, the caller where interrupts are re-enabled for kernel samples.
 
 ## 7. Open items from the Linux-host review
 
+The parts that can be tested without a macOS disk have tests in [`tests/fki/`](../tests/fki/README.md) (host calls,
+address translation, `fki_phys_peek`, a failed `xnu.ko` load giving everything back).
+
 Found while reviewing the Linux side; not fixed yet because each needs a design change or a test on real hardware.
 
 | Now | Replace with |
@@ -112,7 +115,6 @@ Found while reviewing the Linux side; not fixed yet because each needs a design 
 | xnudrmd runs as root, started by `systemd-run` with no sandboxing, and parses requests from the hosted system | Drop to a user in the `render` group after opening its devices, or a unit with `NoNewPrivileges=`, `DeviceAllow=` and `ProtectSystem=strict` |
 | The service and `xnudrmd` run from the checkout (often under /home) as a user with passwordless sudo | Install modules and binaries to root-owned paths and run the unit as root without sudo |
 | Runtime files (console input, input queue, framebuffer, keystore) in `/var/tmp` (now 0600, refused when pre-created by another user) | `RuntimeDirectory=xnulinux` (`/run/xnulinux`, 0700) and character devices (section 2) |
-| `xnu_init` error paths leak open files, firmware and, in mode 3, the contiguous region and the L1 window mapping | One unwind path that runs `xnu_exit`'s body |
 | `macho.c` trusts the image's load commands (sizes, offsets, counts); the image is root-owned firmware, so this is robustness, not a privilege boundary | One bounds helper with overflow-safe checks on every offset |
 | Mode 2's vmalloc region holds the image and `ram_mb` only, while the boot data (ADT, RAM disk, trust cache, framebuffer) is written after it unchecked | Size it as mode 3 does and check the total |
 | No `bti` landing pads in `world.S` (`xnu_fault_tramp`, `xnu_world_fault_abort`) and fki's `branch-protection=none` entry points; unverified whether a BTI-enforcing kernel traps there | Test on a `CONFIG_ARM64_BTI_KERNEL` host; add `bti c`/`bti jc` or clear PSTATE.BTYPE when redirecting |

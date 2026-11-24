@@ -5,8 +5,12 @@
 set -ex
 export DEBIAN_FRONTEND=noninteractive
 if [ ! -x /usr/lib/llvm-21/bin/clang ]; then
-  wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
-  echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
+  # the key signs apt.llvm.org's packages only (signed-by), not every repository as in /etc/apt/trusted.gpg.d
+  sudo install -d -m 0755 /etc/apt/keyrings
+  wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/keyrings/apt.llvm.org.asc >/dev/null
+  CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-noble}")
+  echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.asc] http://apt.llvm.org/$CODENAME/ llvm-toolchain-$CODENAME-21 main" |
+    sudo tee /etc/apt/sources.list.d/llvm21.list
   sudo apt-get update -qq
 fi
 sudo -E apt-get install -y -qq build-essential autoconf automake libtool pkg-config git python3 python3-yaml python3-packaging \

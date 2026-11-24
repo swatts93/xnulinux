@@ -12,8 +12,14 @@ LINUX_MEM=${LINUX_MEM:-7G}; CARVE_BASE=${CARVE_BASE:-0x200000000}; CARVE_MB=${CA
 G=/etc/default/grub.d/99-xnulinux.cfg
 # nokaslr: arm64's EFI stub randomises the Linux kernel's physical load address across all EFI memory before mem=
 # takes effect, which otherwise places the kernel image inside the carve-out on some boots (fki then refuses to map it).
-echo "GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX mem=$LINUX_MEM nokaslr log_buf_len=128M\"" | sudo tee $G >/dev/null
-sudo update-grub >/dev/null 2>&1
+ARGS="mem=$LINUX_MEM nokaslr log_buf_len=128M"
+INSMOD=$(command -v insmod || echo /usr/sbin/insmod)
+if command -v update-grub >/dev/null && [ -d /etc/default/grub.d ]; then	# Debian, Ubuntu
+  echo "GRUB_CMDLINE_LINUX=\"\$GRUB_CMDLINE_LINUX $ARGS\"" | sudo tee $G >/dev/null
+  sudo update-grub >/dev/null 2>&1 || { echo "update-grub failed: add '$ARGS' to the kernel command line by hand" >&2; exit 1; }
+else
+  echo "no update-grub here: add '$ARGS' to the kernel command line yourself (e.g. grubby --update-kernel=ALL --args=...)" >&2
+fi
 sudo tee /etc/systemd/system/xnulinux-fki.service >/dev/null <<UNIT
 [Unit]
 Description=xnulinux: fki.ko with the hosted kernel's DRAM reserved
@@ -24,7 +30,7 @@ Before=sysinit.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/sbin/insmod $P/fki-ko/fki.ko carve_base=$CARVE_BASE carve_mb=$CARVE_MB
+ExecStart=$INSMOD $P/fki-ko/fki.ko carve_base=$CARVE_BASE carve_mb=$CARVE_MB
 
 [Install]
 WantedBy=sysinit.target

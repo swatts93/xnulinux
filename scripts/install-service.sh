@@ -8,6 +8,11 @@ set -euo pipefail
 P=$(cd "$(dirname "$0")/.." && pwd)
 U=$(id -un)
 [ -f /var/tmp/mac.conf ] || { echo "no /var/tmp/mac.conf: make the disk first (scripts/mk-macvm-disk.sh)" >&2; exit 1; }
+[ -f /etc/systemd/system/xnulinux-fki.service ] ||
+  { echo "no xnulinux-fki.service: run scripts/vm-install-fki-service.sh first (and reboot)" >&2; exit 1; }
+# the service runs as $U and xnulinux-boot.sh uses sudo, with no terminal to ask for a password
+sudo -n true 2>/dev/null || { echo "$U needs sudo without a password for the service (the boot script uses sudo)" >&2; exit 1; }
+case $P in *[[:space:]]*) echo "the checkout's path has a space ($P): systemd's ExecStart would split it" >&2; exit 1;; esac
 [ -f /etc/xnulinux.conf ] || sudo tee /etc/xnulinux.conf >/dev/null <<'CONF'
 # The hosted macOS (scripts/xnulinux-boot.sh reads this, then /var/tmp/mac.conf for the disk's UUIDs); the environment
 # overrides what is written as ${NAME:-default}

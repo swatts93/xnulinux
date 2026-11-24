@@ -17,33 +17,58 @@
 #   IMAGE (xnu/kc.bin: the kernel collection under /lib/firmware)  GPU (auto|off)  CPUS (1: the hosted system's CPUs)  XNU_ARGS (more xnu.ko parameters)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+die() { echo "xnulinux-boot: $*" >&2; exit 1; }
+xnu_loaded() { [ -d /sys/module/xnu ]; }	# not `lsmod | grep -q`: with pipefail, grep's early exit can fail the pipe
+# the run's insmod: root's only, so another user's process with the same words in its command line cannot hold us
+xnu_running() { pgrep -u 0 -f '^insmod xnu-ko/xnu.ko' >/dev/null; }
 if [ "${1:-}" = stop ]; then	# end the running hosted system (its disk synced first) and remove xnu.ko
-  if ! lsmod | grep -q '^xnu '; then
+  if ! xnu_loaded; then
     sudo systemctl stop xnudrmd 2>/dev/null || true
     echo "no hosted system is running"; exit 0
   fi
   printf 'sync\n' >> "${CONSOLE_IN:-/var/tmp/console-in}"; sleep 3
   echo 1 | sudo tee /sys/module/xnu/parameters/stop_run >/dev/null
   # every XNU CPU sees the stop at its next host call; one in a long one (disk I/O while the VM shuts down) takes a while
-  for _ in $(seq 1 600); do pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null || break; sleep 0.2; done
-  if lsmod | grep -q '^xnu '; then sudo rmmod xnu; fi
+  for _ in $(seq 1 600); do xnu_running || break; sleep 0.2; done
+  if xnu_loaded; then sudo rmmod xnu; fi
   sudo systemctl stop xnudrmd 2>/dev/null || true
   echo "hosted system stopped"
   exit
 fi
 WAIT=0; [ "${1:-}" = --wait ] && WAIT=1
-[ -f /etc/xnulinux.conf ] && . /etc/xnulinux.conf
-[ -f /var/tmp/mac.conf ] && . /var/tmp/mac.conf
+# The configuration is shell code run by a user with sudo: read it only when nobody else can have written it (owned by
+# root or by us, not group- or world-writable, not a symlink). /var/tmp is writable by every user.
+safe_source() {
+  [ -e "$1" ] || return 0
+  [ ! -L "$1" ] && [ -f "$1" ] || die "$1: not a regular file; not reading it"
+  local owner mode; owner=$(stat -c %u "$1"); mode=$(stat -c %a "$1")
+  { [ "$owner" = 0 ] || [ "$owner" = "$(id -u)" ]; } || die "$1: owned by uid $owner, not root or $(id -un); not reading it"
+  (( (8#$mode & 8#022) == 0 )) || die "$1: group- or world-writable (mode $mode); not reading it (chmod go-w $1)"
+  # shellcheck disable=SC1090
+  . "$1"
+}
+safe_source /etc/xnulinux.conf
+safe_source /var/tmp/mac.conf
 DISK=${DISK:-/var/tmp/mac.img}; RAM_MB=${RAM_MB:-7900}; GPU=${GPU:-auto}; CPUS=${CPUS:-1}
 CONSOLE_IN=${CONSOLE_IN:-/var/tmp/console-in}; INPUT_IN=${INPUT_IN:-/var/tmp/xnu-input}; FB_DUMP=${FB_DUMP:-/var/tmp/xnu-fb.raw}
 KEYSTORE=${KEYSTORE:-/var/tmp/xnu-keystore.bin}; TRUSTCACHE=${TRUSTCACHE:-xnu/trustcache-mac.bin}; IMAGE=${IMAGE:-xnu/kc.bin}
 BOOTARGS=${BOOTARGS:-amfi_get_out_of_my_way=1 lp-sip0=2050}
 : "${ROOT_UUID:?no ROOT_UUID (/var/tmp/mac.conf from mk-macvm-disk.sh)}" "${BOOT_UUID:?no BOOT_UUID}"
-lsmod | grep -q '^xnu ' && { echo "xnu.ko is loaded: a hosted system is running (sudo rmmod xnu first)" >&2; exit 1; }
+xnu_loaded && { echo "xnu.ko is loaded: a hosted system is running (sudo rmmod xnu first)" >&2; exit 1; }
 
 K=/lib/modules/$(uname -r)/build
-build() {	# a module; its compiler errors on failure
-  local log; log=$(make -s -C "$K" M="$PWD/$1" ${2:-} modules 2>&1) || { echo "$log" | grep -E "error|Error" | head -20 >&2; exit 1; }
+# What the README requires of the host, checked before anything is built or loaded (XNULINUX_SKIP_PREFLIGHT=1 skips it)
+preflight() {
+  [ "$(uname -m)" = aarch64 ] || die "the host must be arm64 (this is $(uname -m))"
+  [ "$(getconf PAGESIZE)" = 4096 ] || die "the host kernel must use 4 KB pages (it uses $(getconf PAGESIZE) bytes)"
+  grep -qw paca /proc/cpuinfo || die "the CPU (or the VM) does not offer pointer authentication (PAC, FEAT_PAuth)"
+  [ -d "$K" ] || die "no kernel headers for $(uname -r) in $K (Debian/Ubuntu: sudo apt install linux-headers-$(uname -r))"
+  command -v make >/dev/null && command -v python3 >/dev/null || die "make and python3 are needed"
+  [ -e "$DISK" ] || die "no system disk $DISK (scripts/mk-macvm-disk.sh)"
+}
+[ "${XNULINUX_SKIP_PREFLIGHT:-0}" = 1 ] || preflight
+build() {	# a module; the end of the build's output on failure (a missing header or tool shows here too)
+  local log; log=$(make -s -C "$K" M="$PWD/$1" ${2:-} modules 2>&1) || { echo "$log" | tail -25 >&2; die "building $1 failed"; }
 }
 build fki-ko
 build xnu-ko "KBUILD_EXTRA_SYMBOLS=$PWD/fki-ko/Module.symvers"
@@ -62,9 +87,19 @@ fi
   echo "fki has no carve-out (scripts/vm-install-fki-service.sh): the allocation from CMA may fail" >&2
 bash scripts/vm-net-up.sh
 
-# the hosted system's files on the host: console and input queues, the framebuffer xnu.ko writes, the keystore
-: > "$CONSOLE_IN"; : > "$INPUT_IN"; : > "$FB_DUMP"
-rm -f "$KEYSTORE"; truncate -s 1M "$KEYSTORE"	# fresh each boot, as the disk was made (persisting it: production.md)
+# the hosted system's files on the host: console and input queues, the framebuffer xnu.ko writes, the keystore. The
+# kernel opens them as root and follows symlinks, and they default to /var/tmp, where any user can create a file first:
+# refuse one that is a symlink or someone else's, and keep them private (the console input is a root shell in the hosted
+# system, the input queue carries keystrokes, the framebuffer the screen, the keystore its keys).
+runtime_file() {
+  if [ -L "$1" ] || { [ -e "$1" ] && [ "$(stat -c %u "$1")" != "$(id -u)" ]; }; then
+    die "$1 is a symlink or belongs to another user: remove it (sudo rm $1) and start again"
+  fi
+  ( umask 077; : > "$1" ); chmod 600 "$1"
+}
+runtime_file "$CONSOLE_IN"; runtime_file "$INPUT_IN"; runtime_file "$FB_DUMP"
+# fresh each boot, as the disk was made (persisting it: production.md)
+runtime_file "$KEYSTORE"; truncate -s 1M "$KEYSTORE"
 # XNU's DRAM is one physically contiguous block (GBs, from CMA): free the page cache and compact first. Right after the VM
 # boots the allocation can still fail with the area free (a page in the way not yet migratable): wait and try again,
 # for up to three minutes.
@@ -105,6 +140,7 @@ fi
 # mode=3: the kernel collection; the run lasts until the hosted system halts.
 # insmod returns when the run ends: it runs detached, its output in /var/tmp/xnu-insmod.log.
 START=$(date +%s)	# the run's log (--wait) starts here, so a failure while xnu.ko loads is in it
+runtime_file /var/tmp/xnu-insmod.log
 for try in 1 2 3 4 5 6 7 8 9; do
   sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; echo 1 | sudo tee /proc/sys/vm/compact_memory >/dev/null
   sudo dmesg -C
@@ -113,12 +149,13 @@ for try in 1 2 3 4 5 6 7 8 9; do
     console_in="$CONSOLE_IN" input_in="$INPUT_IN" fb_dump="$FB_DUMP" keystore="$KEYSTORE" bootargs="\"$BOOTARGS\"" ${XNU_ARGS:-} \
     > /var/tmp/xnu-insmod.log 2>&1 < /dev/null &
   sleep 5
-  if sudo dmesg | grep -aqE "fki: carve-out .* (overlaps|is not all RAM)"; then	# a configuration error: no retry
-    sudo dmesg | grep -aE "fki: carve-out .* (overlaps|is not all RAM)" >&2
+  KLOG=$(sudo dmesg)	# read once: `dmesg | grep -q` can fail the pipe (pipefail) when grep stops reading early
+  if grep -aqE "fki: carve-out .* (overlaps|is not all RAM)" <<<"$KLOG"; then	# a configuration error: no retry
+    grep -aE "fki: carve-out .* (overlaps|is not all RAM)" <<<"$KLOG" >&2
     sudo systemctl stop xnudrmd 2>/dev/null || true
     exit 1
   fi
-  sudo dmesg | grep -aq "contiguous allocation failed" || break
+  grep -aq "contiguous allocation failed" <<<"$KLOG" || break
   if [ $try = 9 ]; then
     echo "no contiguous memory for XNU (CMA: $(grep CmaFree /proc/meminfo))" >&2
     sudo systemctl stop xnudrmd 2>/dev/null || true
@@ -135,7 +172,7 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   local LOGDIR=/var/log/xnulinux LOG
   # insmod has returned but xnu.ko stays loaded after a run that ended by itself (a panic, a halt): unload it, or the
   # next start (systemd's restart after a panic) finds it and refuses
-  if lsmod | grep -q '^xnu '; then sudo rmmod xnu || echo "xnu.ko did not unload" >&2; fi
+  if xnu_loaded; then sudo rmmod xnu || echo "xnu.ko did not unload" >&2; fi
   sudo systemctl stop xnudrmd 2>/dev/null || true
   sudo mkdir -p "$LOGDIR"
   LOG=$LOGDIR/run-$(date -d @"$START" +%Y%m%d-%H%M%S).log
@@ -147,6 +184,6 @@ collect() {	# the run's kernel log, kept; the status says how it ended
   echo "the run ended: $LOG" >&2; return 3
 }
 # systemctl stop: ExecStop (xnulinux-boot.sh stop) ends the run, then systemd sends this script SIGTERM
-trap 'while pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null; do sleep 1; done; collect stopped; exit $?' TERM
-while pgrep -f "insmod xnu-ko/xnu.ko" >/dev/null; do sleep 2 & wait $!; done
+trap 'while xnu_running; do sleep 1; done; collect stopped; exit $?' TERM
+while xnu_running; do sleep 2 & wait $!; done
 collect; exit $?

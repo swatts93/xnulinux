@@ -1,0 +1,13 @@
+# Build output (kernel modules, xnudrmd) and Python caches: never committed
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+.*.cmd
+*.order
+Module.symvers
+.tmp_versions/
+gpu/xnu-drm/xnudrmd
+__pycache__/
+*.pyc

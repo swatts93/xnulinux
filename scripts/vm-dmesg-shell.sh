@@ -5,7 +5,7 @@
 # printk with interrupts off on XNU's CPU (RCU stall). The ring buffer is read through journald (`journalctl -k`): after a
 # few minutes of XNU's output `dmesg` (util-linux, /dev/kmsg) stopped showing new records while journald kept them.
 # Usage: vm-dmesg-shell.sh mark | send 'cmd' [secs] | since MARK
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 case "$1" in
   mark) bash scripts/vm.sh 'sudo journalctl -k -n1 -q -o short-monotonic | sed "s/^\[ *\([0-9.]*\)\].*/\1/"';;
   send) printf '%s\n' "$2" | timeout 30 bash scripts/vm.sh 'cat >> /var/tmp/console-in'; sleep "${3:-10}";;

@@ -30,7 +30,9 @@
 #endif
 
 #define HC_MAX (8UL << 20)		/* largest request or reply */
+#ifndef HC_TIMEOUT			/* (a test build sets a shorter one) */
 #define HC_TIMEOUT (120 * HZ)		/* a service that does not answer: the call fails */
+#endif
 
 struct xnu_hostcall_xlate {
 	__u64 va, len;			/* a range of the caller's address space, 4 KiB aligned */

@@ -107,7 +107,10 @@ static int do_ioctl(int fd, uint32_t client, uint32_t nr, uint8_t *p, uint32_t p
 		struct drm_virtgpu_execbuffer *a = (void *)p; NEED(*a);
 		if (a->num_in_syncobjs || a->num_out_syncobjs || (a->flags & VIRTGPU_EXECBUF_FENCE_FD_IN)) return -EOPNOTSUPP;
 		if ((r = ptr_field(p, plen, &a->command, a->size))) return r;
-		if ((r = ptr_field(p, plen, &a->bo_handles, (uint64_t)a->num_bo_handles * 4))) return r;
+		if ((r = ptr_field(p, plen, &a->bo_handles, (uint64_t)a->num_bo_handles * 4))) {
+			unptr_field(p, &a->command);	/* the reply carries the payload: never our own address */
+			return r;
+		}
 		a->fence_fd = -1;
 		r = ioctl(fd, DRM_IOCTL_VIRTGPU_EXECBUFFER, a);
 		unptr_field(p, &a->command);
@@ -146,7 +149,7 @@ static int do_map(int fd, uint32_t client, struct xnudrm_hdr *h, uint8_t *out, u
 	va = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, m.offset);
 	if (va == MAP_FAILED) return -errno;
 	for (i = 0; i < n; i++) (void)*(volatile uint8_t *)((uint8_t *)va + (i << 12));	/* fault every page in */
-	pa = malloc(n * 8);
+	pa = calloc(n, 8);
 	if (!pa) { munmap(va, len); return -ENOMEM; }
 	struct xnu_hostcall_xlate x = { (uintptr_t)va, len, (uintptr_t)pa, n };
 	if (ioctl(hc, XNU_HOSTCALL_XLATE, &x)) { int e = -errno; free(pa); munmap(va, len); return e; }
@@ -228,8 +231,9 @@ static void serve(uint8_t *in, size_t inlen, uint8_t *out, size_t *outlen)
 		if (!f || !f->fd || f->client != (int)h->client) { st = -EINVAL; break; }
 		if (h->op == XNUDRM_FENCE_CLOSE) { close(f->fd - 1); f->fd = 0; break; }
 		struct pollfd p = { .fd = f->fd - 1, .events = POLLIN };
-		int ms = h->arg1 ? (int)((h->arg1 + 999999) / 1000000) : 0;
-		int r = poll(&p, 1, ms > 50 ? 50 : ms);	/* never hold the hosted CPU in a host call longer than 50 ms */
+		/* clamped before narrowing: a huge timeout must not wrap to a negative int, which poll() takes as forever */
+		uint64_t ns = h->arg1, ms = ns ? ns / 1000000 + (ns % 1000000 != 0) : 0;
+		int r = poll(&p, 1, ms > 50 ? 50 : (int)ms);	/* never hold the hosted CPU in a host call longer than 50 ms */
 		st = r < 0 ? -errno : r == 0 ? -XNUDRM_ETIME : 0;
 		break;
 	}

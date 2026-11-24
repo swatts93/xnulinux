@@ -101,3 +101,20 @@ records, hosted, the caller where interrupts are re-enabled for kernel samples.
 |---|---|
 | Done: 16 KB VM pages by default (`xnu.ko vm16k=1`, over the 4 KB granule, XNU's PAGE_RATIO 4): a quarter of the page faults, the desktop ~30% sooner, fork 2-3x faster than 4 KB; the WindowServer abort it seemed to cause was a start-up race with `xnudrmd` (fixed), and the early hang seen once did not come back in ~30 boots | The host's own 16 KB granule (a 16 KB Linux kernel) for the TLB reach native macOS has: memory-bound code is still up to 1.6x slower |
 | The system disk keeps hardware daemons that crash or retry without their hardware | No crash reports after a boot: each crashing daemon fixed (a stand-in service or property) or disabled with a reason |
+
+## 7. Open items from the Linux-host review
+
+Found while reviewing the Linux side; not fixed yet because each needs a design change or a test on real hardware.
+
+| Now | Replace with |
+|---|---|
+| `XNU_HOSTCALL_XLATE` hands XNU the physical pages of xnudrmd's GEM mappings without holding them: if xnudrmd exits or is restarted while XNU runs, macOS processes keep mappings of pages Linux frees and reuses (the boot script never restarts it, but a crash or `kill` does) | fki holds a reference per translated range (pin, or the DRM file and mm) until XNU unmaps it, and revokes XNU's mappings when the service closes `/dev/xnu-hostcall` |
+| xnudrmd runs as root, started by `systemd-run` with no sandboxing, and parses requests from the hosted system | Drop to a user in the `render` group after opening its devices, or a unit with `NoNewPrivileges=`, `DeviceAllow=` and `ProtectSystem=strict` |
+| The service and `xnudrmd` run from the checkout (often under /home) as a user with passwordless sudo | Install modules and binaries to root-owned paths and run the unit as root without sudo |
+| Runtime files (console input, input queue, framebuffer, keystore) in `/var/tmp` (now 0600, refused when pre-created by another user) | `RuntimeDirectory=xnulinux` (`/run/xnulinux`, 0700) and character devices (section 2) |
+| `xnu_init` error paths leak open files, firmware and, in mode 3, the contiguous region and the L1 window mapping | One unwind path that runs `xnu_exit`'s body |
+| `macho.c` trusts the image's load commands (sizes, offsets, counts); the image is root-owned firmware, so this is robustness, not a privilege boundary | One bounds helper with overflow-safe checks on every offset |
+| Mode 2's vmalloc region holds the image and `ram_mb` only, while the boot data (ADT, RAM disk, trust cache, framebuffer) is written after it unchecked | Size it as mode 3 does and check the total |
+| No `bti` landing pads in `world.S` (`xnu_fault_tramp`, `xnu_world_fault_abort`) and fki's `branch-protection=none` entry points; unverified whether a BTI-enforcing kernel traps there | Test on a `CONFIG_ARM64_BTI_KERNEL` host; add `bti c`/`bti jc` or clear PSTATE.BTYPE when redirecting |
+| `xnulinux-boot.sh` decides the run started after a fixed `sleep 5` and clears the kernel ring buffer (`dmesg -C`) on every attempt | Wait for a positive marker from xnu.ko with a timeout; read the log with `journalctl -k --since` instead of clearing it |
+| `linux/drivers/fki` (the in-tree form) implements a subset of `fki-ko`'s exports, with a different `fki_idle_until` and without the FP/SIMD and PAC fixes of `fki_enter`, under the same `FKI_VERSION` | Generate it from `fki-ko`, or drop it until it is used |

@@ -62,6 +62,8 @@ preflight() {
   [ "$(uname -m)" = aarch64 ] || die "the host must be arm64 (this is $(uname -m))"
   [ "$(getconf PAGESIZE)" = 4096 ] || die "the host kernel must use 4 KB pages (it uses $(getconf PAGESIZE) bytes)"
   grep -qw paca /proc/cpuinfo || die "the CPU (or the VM) does not offer pointer authentication (PAC, FEAT_PAuth)"
+  local kv; kv=$(uname -r); kv=${kv%%-*}
+  printf '6.12\n%s\n' "$kv" | sort -VC || die "fki.ko needs Linux 6.12 or later (this is $(uname -r))"
   [ -d "$K" ] || die "no kernel headers for $(uname -r) in $K (Debian/Ubuntu: sudo apt install linux-headers-$(uname -r))"
   command -v make >/dev/null && command -v python3 >/dev/null || die "make and python3 are needed"
   [ -e "$DISK" ] || die "no system disk $DISK (scripts/mk-macvm-disk.sh)"

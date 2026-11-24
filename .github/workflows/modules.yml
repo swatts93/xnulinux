@@ -8,12 +8,18 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        # the newest kernel, and the oldest Ubuntu series at or above fki's minimum (6.12)
+        series: ['[0-9.]+', '6\.14\.[0-9]+']
     steps:
       - uses: actions/checkout@v4
       - name: Kernel headers
         run: |
           sudo apt-get update -qq
-          pkg=$(apt-cache search --names-only '^linux-headers-[0-9.]+-[0-9]+-generic$' | awk '{print $1}' | sort -V | tail -1)
+          pkg=$(apt-cache search --names-only '^linux-headers-${{ matrix.series }}-[0-9]+-generic$' | awk '{print $1}' | sort -V | tail -1)
+          [ -n "$pkg" ] || { echo "no headers for ${{ matrix.series }}"; exit 1; }
           echo "headers: $pkg"
           sudo apt-get install -y -qq "$pkg" >/dev/null
           echo "KDIR=/usr/src/${pkg#linux-headers-}" | sed 's|/usr/src/|/usr/src/linux-headers-|' >> "$GITHUB_ENV"
@@ -25,6 +31,10 @@ jobs:
         run: |
           test "$(modinfo -F license fki-ko/fki.ko)" = GPL
           test "$(modinfo -F license xnu-ko/xnu.ko)" = Proprietary
+      - name: xnu.ko calls Linux only through fki_*
+        run: |
+          extra=$(nm -u xnu-ko/xnu.ko | awk '{print $2}' | grep -vE '^(fki_|memcpy$|memset$|param_ops_)' || true)
+          [ -z "$extra" ] || { echo "xnu.ko imports from Linux:"; echo "$extra"; exit 1; }
   spdx:
     runs-on: ubuntu-24.04
     steps:

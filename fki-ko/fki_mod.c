@@ -24,6 +24,7 @@
 #include <linux/sched.h>
 #include <linux/cpumask.h>
 #include <linux/vmalloc.h>
+#include <linux/version.h>
 #include <asm/arch_timer.h>
 #include <asm/neon.h>
 #include <asm/sysreg.h>
@@ -196,10 +197,15 @@ static __always_inline void keys_write(const struct fki_pac_keys *k)
  */
 static void fki_fpsimd_forget(void)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)	/* kernel-mode NEON takes the caller's save buffer since 6.19 */
 	struct user_fpsimd_state scratch;	/* where Linux would save a kernel-mode state over a context switch: none here */
 
 	kernel_neon_begin(&scratch);
 	kernel_neon_end(&scratch);
+#else
+	kernel_neon_begin();
+	kernel_neon_end();
+#endif
 }
 
 __attribute__((target("branch-protection=none"))) unsigned long fki_enter(const struct fki_pac_keys *foreign, struct fki_pac_keys *saved)
@@ -423,7 +429,8 @@ EXPORT_SYMBOL(fki_fault_unregister);
 
 fki_u64 fki_phys_peek(fki_u64 pa)
 {
-	if (!pfn_valid(PHYS_PFN(pa)))
+	/* in the linear map: pfn_valid() is also true for memory with a struct page but no mapping (NOMAP firmware regions) */
+	if (!pfn_is_map_memory(PHYS_PFN(pa)))
 		return ~0ULL;
 	return READ_ONCE(*(u64 *)phys_to_virt(pa & ~7ULL));
 }
@@ -601,9 +608,20 @@ EXPORT_SYMBOL(fki_contig_free);
 
 int fki_window_l1(unsigned long va, unsigned long long **l1_va, fki_u64 *l1_pa)
 {
-	u64 ttbr1 = read_sysreg(ttbr1_el1) & GENMASK_ULL(47, 1);
-	u64 *l0 = phys_to_virt(ttbr1 & ~0xfffULL);
-	u64 e = READ_ONCE(l0[(va >> 39) & 511]);
+	u64 ttbr1, *l0, e;
+
+	/*
+	 * The walk below is for 4 KB pages and four levels (48-bit VAs): with another granule or level count the top table
+	 * is not an L0 and XNU would be handed the wrong level to install its 1 GB blocks in.
+	 */
+	if (PAGE_SHIFT != 12 || CONFIG_PGTABLE_LEVELS != 4) {
+		pr_err("fki: the foreign window needs 4 KB pages and 4 page-table levels (this kernel: %lu KB, %d levels)\n",
+		       PAGE_SIZE >> 10, CONFIG_PGTABLE_LEVELS);
+		return -EOPNOTSUPP;
+	}
+	ttbr1 = read_sysreg(ttbr1_el1) & GENMASK_ULL(47, 1);
+	l0 = phys_to_virt(ttbr1 & ~0xfffULL);
+	e = READ_ONCE(l0[(va >> 39) & 511]);
 
 	if ((e & 3) != 3)
 		return -ENOENT;
@@ -981,6 +999,7 @@ static int __init fki_init(void)
 
 static void __exit fki_exit(void)
 {
+	fki_fault_unregister();	/* no kprobe left pointing into this module's text (a no-op when xnu.ko unregistered) */
 	fki_hostcall_exit();
 	if (resv_pg && !resv_used)
 		p_cma_release(*p_cma_area, resv_pg, resv_cnt);

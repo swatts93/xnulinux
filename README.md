@@ -88,8 +88,10 @@ the system volume, AMFI is patched and SIP relaxed, and memory access is slower 
 
 ## Requirements
 
-- An arm64 Linux host with PAC (`FEAT_PAuth`), 4K pages, and at least 16 GB of RAM (8 GB reserved for the hosted
-  kernel). Tested on:
+- An arm64 Linux host with PAC (`FEAT_PAuth`), 4K pages with 4-level page tables (48-bit VAs, the arm64 default), Linux
+  6.12 or later (on Ubuntu 24.04, the HWE kernel), and at least 16 GB of RAM (8 GB reserved for the hosted kernel).
+  `scripts/xnulinux-boot.sh` checks the CPU, page size, kernel version and headers before it builds anything. `fki.ko`
+  and `xnu.ko` build against Ubuntu's 6.14, 6.17 and 7.0 arm64 kernel headers. Tested on:
   - **NVIDIA DGX Spark** (bare-metal Ubuntu 24.04.5 LTS aarch64, Linux `7.0.0-1025-nvidia`; CPU rendering for now).
   - **Apple Silicon Mac (M1 or later)** running an arm64 Linux VM (`krunkit` for GPU access via virtio-gpu Venus, or
     `tart`).
